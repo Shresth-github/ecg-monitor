@@ -70,55 +70,15 @@ export default function Home() {
   // PDF Exporting progress indicator
   const [isExportingPDF, setIsExportingPDF] = useState<boolean>(false);
 
-  // ESP32 Status states
-  const [esp32LastSeen, setEsp32LastSeen] = useState<string | null>(null);
-  const [secondsSinceLastPing, setSecondsSinceLastPing] = useState<number | null>(null);
-  const [isEsp32Online, setIsEsp32Online] = useState<boolean>(false);
-
-  const fetchEsp32Status = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('esp32_status')
-        .select('last_seen')
-        .eq('id', 1);
-      
-      if (error) throw error;
-      if (data && data.length > 0 && data[0].last_seen) {
-        const lastSeen = data[0].last_seen;
-        setEsp32LastSeen(lastSeen);
-        const lastSeenTime = new Date(lastSeen).getTime();
-        const diffSeconds = Math.floor((Date.now() - lastSeenTime) / 1000);
-        setSecondsSinceLastPing(diffSeconds >= 0 ? diffSeconds : 0);
-        setIsEsp32Online(diffSeconds <= 15);
-      }
-    } catch (err) {
-      console.error('Error fetching ESP32 status:', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchEsp32Status();
-    const interval = setInterval(() => {
-      fetchEsp32Status();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [fetchEsp32Status]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (esp32LastSeen) {
-        const lastSeenTime = new Date(esp32LastSeen).getTime();
-        const diffSeconds = Math.floor((Date.now() - lastSeenTime) / 1000);
-        setSecondsSinceLastPing(diffSeconds >= 0 ? diffSeconds : 0);
-        setIsEsp32Online(diffSeconds <= 15);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [esp32LastSeen]);
+  const lastFetchedIdRef = useRef<number | null>(null);
 
   // Common reading handler for both live DB subscription and client-side simulator
   const handleNewReading = useCallback((reading: ECGReading) => {
+    if (lastFetchedIdRef.current === reading.id) return;
+    lastFetchedIdRef.current = reading.id;
+
     setReadings((prev) => {
+      if (prev.some(r => r.id === reading.id)) return prev;
       const updated = [...prev, reading];
       if (updated.length > 50) {
         return updated.slice(updated.length - 50);
@@ -164,6 +124,39 @@ export default function Home() {
       console.error('Error fetching initial data:', err);
     }
   }, []);
+
+  // Poll latest reading fallback (updates every 1s)
+  const pollLatestReading = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('ecg_readings')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      if (data && data.length > 0) {
+        const latest = data[0] as ECGReading;
+        if (latest.id !== lastFetchedIdRef.current) {
+          handleNewReading(latest);
+        }
+      }
+    } catch (err) {
+      console.error('Polling error:', err);
+    }
+  }, [handleNewReading]);
+
+  // Polling loop effect
+  useEffect(() => {
+    if (simulatorMode === 'local') return;
+
+    pollLatestReading();
+    const interval = setInterval(() => {
+      pollLatestReading();
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [simulatorMode, pollLatestReading]);
 
   // Subscribe to real-time changes
   useEffect(() => {
@@ -587,22 +580,6 @@ export default function Home() {
 
         {/* Right Panel: Readouts and trigger */}
         <div className="lg:col-span-4 p-6 flex flex-col gap-6 bg-[#0a0a0a]">
-          
-          {/* Sensor Status Card */}
-          <div className="border border-[#1e1e1e] p-4 bg-[#0a0a0a] font-mono flex flex-col gap-1">
-            <span className="text-[9px] font-semibold tracking-wider text-[#a0a0a0] uppercase">
-              Sensor Status
-            </span>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span className={`w-2 h-2 rounded-none ${isEsp32Online ? 'bg-[#00c896]' : 'bg-[#e05252]'}`} />
-              <span className={`text-xs font-bold ${isEsp32Online ? 'text-[#00c896]' : 'text-[#e05252]'}`}>
-                ESP32 {isEsp32Online ? 'ONLINE' : 'OFFLINE'}
-              </span>
-            </div>
-            <span className="text-[9px] text-[#555] mt-0.5">
-              Last ping: {secondsSinceLastPing !== null ? `${secondsSinceLastPing}s ago` : '---'}
-            </span>
-          </div>
           
           {/* Top Card: Live Value readout */}
           <div className="border border-[#1e1e1e] p-5 flex flex-col gap-4 bg-[#0a0a0a]">
